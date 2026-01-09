@@ -1,0 +1,12 @@
+# Domains to exclude from the merged list
+startpage.com
+amazon.de
+amazon.com
+redd.it
+githubusercontent.com
+youtube.com
+googlevideo.com
+#microsoft.com
+#appcenter.ms
+teams.microsoft.com
+github.com

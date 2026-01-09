@@ -1,0 +1,12 @@
+# generated / runtime
+source_failures.json
+merge_blocklists.log
+merged_list.txt
+
+# python
+__pycache__/
+*.pyc
+.venv
+venv/
+ENV/
+

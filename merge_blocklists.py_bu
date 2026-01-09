@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""
+Weekly blocklist merger
+
+- Reads URLs from sources.txt (relative to this script)
+- Downloads each list
+- Extracts domain entries
+- Deduplicates + sorts
+- Writes output atomically to:
+  /var/www/vhosts/mallouki.de/httpdocs/cms/blocklist/merged_list.tst
+- Logs to:
+  /root/blocklist-generator/merge_blocklists.log
+"""
+
+from __future__ import annotations
+
+import html
+import ipaddress
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Optional, Set
+from urllib.parse import urlparse
+
+import requests
+
+
+# ---- Config ----
+SCRIPT_DIR = Path(__file__).resolve().parent
+SOURCES_FILE = SCRIPT_DIR / "sources.txt"
+ALLOWED_FILE = SCRIPT_DIR / "allowed.txt"
+OUTPUT_FILE = Path("/var/www/vhosts/mallouki.de/httpdocs/cms/blocklist/merged_list.txt")
+LOG_FILE = SCRIPT_DIR / "merge_blocklists.log"
+
+HTTP_TIMEOUT_SECONDS = 45
+MAX_WORKERS = 8  # simple sequential fallback is fine too; keeping it simple here
+USER_AGENT = "blocklist-generator/1.0"
+
+
+# ---- Parsing helpers ----
+CANDIDATE_RE = re.compile(r"(?i)^[a-z0-9](?:[a-z0-9\-_.]*[a-z0-9])?$")
+ADBLOCK_DOMAIN_RE = re.compile(r"^\|\|([a-z0-9][a-z0-9\-_.]*[a-z0-9])(?:\^|$)", re.IGNORECASE)
+URL_IN_LINE_RE = re.compile(r"(?i)\bhttps?://[^\s\"']+")
+
+IGNORE_HOSTS = {
+    "localhost",
+    "localhost.localdomain",
+    "local",
+    "broadcasthost",
+    "ip6-localhost",
+    "ip6-loopback",
+    "ip6-allnodes",
+    "ip6-allrouters",
+    "0.0.0.0",
+}
+
+
+def log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S %z")
+    line = f"{ts} {msg}\n"
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(line)
+    # also to stdout for manual runs
+    print(line, end="")
+
+
+def normalize_url(u: str) -> str:
+    u = html.unescape(u.strip())
+    # Convert GitHub "blob" -> "raw"
+    if "github.com/" in u and "/blob/" in u:
+        u = u.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
+    return u
+
+
+def is_ip(token: str) -> bool:
+    try:
+        ipaddress.ip_address(token)
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_domain(d: str) -> Optional[str]:
+    d = d.strip().strip(".").lower()
+    if not d or d in IGNORE_HOSTS:
+        return None
+
+    d = d.strip("[](){}<>;,")
+    if d.startswith("*."):
+        d = d[2:]
+
+    if is_ip(d):
+        return None
+
+    if len(d) > 253 or "." not in d:
+        return None
+    if not CANDIDATE_RE.match(d):
+        return None
+    if ".." in d:
+        return None
+
+    # Normalize IDN to punycode for stable dedupe
+    try:
+        d_idna = d.encode("idna").decode("ascii")
+    except Exception:
+        return None
+
+    return d_idna
+
+
+def extract_domains_from_line(line: str) -> Set[str]:
+    out: Set[str] = set()
+    s = line.strip()
+    if not s:
+        return out
+
+    # skip full-line comments
+    if s.startswith(("#", "!", ";")):
+        return out
+
+    # strip inline comments
+    if "#" in s:
+        s = s.split("#", 1)[0].strip()
+        if not s:
+            return out
+
+    tokens = s.split()
+
+    # hosts format: "<ip> <host> [host2...]"
+    if tokens and is_ip(tokens[0]):
+        for host in tokens[1:]:
+            nd = normalize_domain(host)
+            if nd:
+                out.add(nd)
+        return out
+
+    # AdBlock style: ||domain^
+    m = ADBLOCK_DOMAIN_RE.match(s)
+    if m:
+        nd = normalize_domain(m.group(1))
+        if nd:
+            out.add(nd)
+        return out
+
+    # lines containing URLs -> hostname
+    for um in URL_IN_LINE_RE.findall(s):
+        try:
+            p = urlparse(um)
+            if p.hostname:
+                nd = normalize_domain(p.hostname)
+                if nd:
+                    out.add(nd)
+        except Exception:
+            pass
+
+    # treat remaining chunks as potential domains
+    for chunk in re.split(r"[,\s]+", s):
+        if not chunk:
+            continue
+        chunk = chunk.strip().lstrip("@|")
+        chunk = chunk.split("^", 1)[0]
+        chunk = chunk.split("$", 1)[0]
+        nd = normalize_domain(chunk)
+        if nd:
+            out.add(nd)
+
+    return out
+
+
+def read_sources() -> list[str]:
+    if not SOURCES_FILE.exists():
+        raise FileNotFoundError(f"Missing sources file: {SOURCES_FILE}")
+
+    urls: list[str] = []
+    for raw in SOURCES_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        urls.append(normalize_url(line))
+
+    if not urls:
+        raise ValueError(f"No URLs found in {SOURCES_FILE}")
+
+    return urls
+def read_allowed() -> Set[str]:
+    """
+    Read allowed/excluded domains from allowed.txt (relative to script).
+    These domains will be removed from the merged output.
+    """
+    allowed: Set[str] = set()
+    if not ALLOWED_FILE.exists():
+        # allowed.txt is optional; if missing, just return empty set
+        return allowed
+
+    for raw in ALLOWED_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        nd = normalize_domain(line)
+        if nd:
+            allowed.add(nd)
+
+    return allowed
+
+
+def fetch_text(url: str) -> str:
+    headers = {"User-Agent": USER_AGENT}
+    r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.text
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+    os.replace(tmp, path)
+
+
+def main() -> int:
+    try:
+        urls = read_sources()
+    except Exception as e:
+        log(f"[FATAL] Cannot read sources: {e}")
+        return 2
+
+    all_domains: Set[str] = set()
+    failures = 0
+
+    log(f"[START] Sources={len(urls)} Output={OUTPUT_FILE}")
+
+    for url in urls:
+        try:
+            text = fetch_text(url)
+            domains: Set[str] = set()
+            for line in text.splitlines():
+                domains |= extract_domains_from_line(line)
+            all_domains |= domains
+            log(f"[OK]   {url}  domains={len(domains)}")
+        except Exception as e:
+            failures += 1
+            log(f"[FAIL] {url}  error={e}")
+
+    allowed = read_allowed()
+    if allowed:
+        def is_allowed(domain: str) -> bool:
+            return any(domain == a or domain.endswith("." + a) for a in allowed)
+
+        before = len(all_domains)
+        all_domains = {d for d in all_domains if not is_allowed(d)}
+        removed = before - len(all_domains)
+        log(f"[INFO] allowlist_entries={len(allowed)} removed={removed} (including subdomains)")
+
+
+    merged = "\n".join(sorted(all_domains)) + "\n"
+
+    try:
+        atomic_write(OUTPUT_FILE, merged)
+        log(f"[DONE] unique_domains={len(all_domains)} failures={failures} wrote={OUTPUT_FILE}")
+        return 0 if len(all_domains) else 1
+    except Exception as e:
+        log(f"[FATAL] Cannot write output: {e}")
+        return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
