@@ -11,9 +11,14 @@ Weekly blocklist merger
 - Logs to:
   /root/blocklist-generator/merge_blocklists.log
 
-NEW (auto-prune failing sources):
-- Tracks consecutive fetch failures per source URL in source_failures.json
-- If a URL fails 5 times in a row, it is removed from sources.txt automatically
+Features:
+- Local allowlist via allow.txt (removes domains incl. subdomains)
+- Local blocklist via block.txt (adds domains)
+- Auto-prune failing sources:
+  - Tracks consecutive fetch failures per source URL in source_failures.json
+  - If a URL fails 5 times in a row, it is replaced in sources.txt by a PRUNED comment
+- Summary line includes:
+  - active/pruned sources, failures, local block added, allow removed, final unique domains
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 from urllib.parse import urlparse
 
 import requests
@@ -34,11 +39,12 @@ import requests
 # ---- Config ----
 SCRIPT_DIR = Path(__file__).resolve().parent
 SOURCES_FILE = SCRIPT_DIR / "sources.txt"
-ALLOWED_FILE = SCRIPT_DIR / "allowed.txt"
+ALLOW_FILE = SCRIPT_DIR / "allow.txt"
+BLOCK_FILE = SCRIPT_DIR / "block.txt"
 OUTPUT_FILE = Path("/var/www/vhosts/mallouki.de/httpdocs/cms/blocklist/merged_list.txt")
 LOG_FILE = SCRIPT_DIR / "merge_blocklists.log"
 
-# Persistent failure tracking (NEW)
+# Persistent failure tracking
 FAILURE_STATE_FILE = SCRIPT_DIR / "source_failures.json"
 MAX_CONSECUTIVE_FAILURES = 5
 
@@ -176,7 +182,7 @@ def extract_domains_from_line(line: str) -> Set[str]:
     return out
 
 
-# ---------------- NEW: failure state helpers ----------------
+# ---- Failure state helpers ----
 def load_failure_state() -> dict[str, int]:
     if not FAILURE_STATE_FILE.exists():
         return {}
@@ -201,9 +207,8 @@ def save_failure_state(state: dict[str, int]) -> None:
 
 def remove_sources_from_file(urls_to_remove: Set[str]) -> int:
     """
-    Remove URLs from sources.txt while preserving comments/blank lines.
-    Replaces removed URLs with a PRUNED comment including date and reason.
-    Returns how many URL lines were pruned.
+    Replace failing source URLs in sources.txt with a PRUNED comment.
+    Preserves comments/blank lines and leaves other sources unchanged.
     """
     if not urls_to_remove or not SOURCES_FILE.exists():
         return 0
@@ -224,9 +229,7 @@ def remove_sources_from_file(urls_to_remove: Set[str]) -> int:
         norm = normalize_url(stripped)
         if norm in urls_to_remove:
             pruned += 1
-            out.append(
-                f"# PRUNED {today} after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {raw}"
-            )
+            out.append(f"# PRUNED {today} after {MAX_CONSECUTIVE_FAILURES} consecutive failures: {raw}")
             continue
 
         out.append(raw)
@@ -237,6 +240,7 @@ def remove_sources_from_file(urls_to_remove: Set[str]) -> int:
     return pruned
 
 
+# ---- IO helpers ----
 def read_sources() -> list[str]:
     if not SOURCES_FILE.exists():
         raise FileNotFoundError(f"Missing sources file: {SOURCES_FILE}")
@@ -256,14 +260,14 @@ def read_sources() -> list[str]:
 
 def read_allowed() -> Set[str]:
     """
-    Read allowed/excluded domains from allowed.txt (relative to script).
-    These domains will be removed from the merged output.
+    Read allowed/excluded domains from allow.txt (relative to script).
+    These domains will be removed from the merged output (including subdomains).
     """
     allowed: Set[str] = set()
-    if not ALLOWED_FILE.exists():
+    if not ALLOW_FILE.exists():
         return allowed
 
-    for raw in ALLOWED_FILE.read_text(encoding="utf-8").splitlines():
+    for raw in ALLOW_FILE.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -272,6 +276,22 @@ def read_allowed() -> Set[str]:
             allowed.add(nd)
 
     return allowed
+
+
+def read_local_block() -> Set[str]:
+    """
+    Read local block entries from block.txt (relative to script).
+    These domains will be added to the merged output.
+    Supports hosts/adblock/plain domain/url-in-line formats via extract_domains_from_line().
+    """
+    blocked: Set[str] = set()
+    if not BLOCK_FILE.exists():
+        return blocked
+
+    for raw in BLOCK_FILE.read_text(encoding="utf-8").splitlines():
+        blocked |= extract_domains_from_line(raw)
+
+    return blocked
 
 
 def fetch_text(url: str) -> str:
@@ -302,6 +322,12 @@ def main() -> int:
     failures_this_run = 0
     urls_to_prune: Set[str] = set()
 
+    # summary counters
+    local_block_entries = 0
+    local_block_added = 0
+    allowlist_entries = 0
+    allowlist_removed = 0
+
     log(f"[START] Sources={len(urls)} Output={OUTPUT_FILE}")
 
     for url in urls:
@@ -313,14 +339,11 @@ def main() -> int:
             all_domains |= domains
 
             # success => reset consecutive failure count
-            if url in failure_state:
-                del failure_state[url]
+            failure_state.pop(url, None)
 
             log(f"[OK]   {url}  domains={len(domains)}")
         except Exception as e:
             failures_this_run += 1
-
-            # track consecutive failures
             failure_state[url] = int(failure_state.get(url, 0)) + 1
             cnt = failure_state[url]
 
@@ -338,60 +361,78 @@ def main() -> int:
     else:
         log("[PRUNE] removed_sources=0")
 
-    # --- summary ---
-    try:
-        total_lines = SOURCES_FILE.read_text(encoding="utf-8").splitlines()
-        total_urls = 0
-        pruned_urls = 0
+    # merge local block entries from block.txt
+    local_block = read_local_block()
+    if local_block:
+        local_block_entries = len(local_block)
+        before = len(all_domains)
+        all_domains |= local_block
+        local_block_added = len(all_domains) - before
+        log(f"[INFO] local_block_entries={local_block_entries} added={local_block_added} from={BLOCK_FILE.name}")
+    else:
+        log(f"[INFO] local_block_entries=0 (no {BLOCK_FILE.name} or empty)")
 
-        for raw in total_lines:
-            s = raw.strip()
-            if not s:
-                continue
-            if s.startswith("# PRUNED "):
-                pruned_urls += 1
-                continue
-            if s.startswith("#"):
-                continue
-            total_urls += 1
-
-        log(
-            "[SUMMARY] "
-            f"sources_active={total_urls} "
-            f"sources_pruned={pruned_urls} "
-            f"sources_total_seen={total_urls + pruned_urls} "
-            f"failures_this_run={failures_this_run} "
-            f"unique_domains={len(all_domains)}"
-        )
-    except Exception as e:
-        log(f"[WARN] Could not compute summary: {e}")
-
-
-    # persist updated state
+    # persist updated failure state
     try:
         save_failure_state(failure_state)
     except Exception as e:
         log(f"[WARN] Could not write {FAILURE_STATE_FILE.name}: {e}")
 
+    # apply allowlist
     allowed = read_allowed()
+    allowlist_entries = len(allowed)
     if allowed:
         def is_allowed(domain: str) -> bool:
             return any(domain == a or domain.endswith("." + a) for a in allowed)
 
         before = len(all_domains)
         all_domains = {d for d in all_domains if not is_allowed(d)}
-        removed = before - len(all_domains)
-        log(f"[INFO] allowlist_entries={len(allowed)} removed={removed} (including subdomains)")
+        allowlist_removed = before - len(all_domains)
+        log(f"[INFO] allowlist_entries={allowlist_entries} removed={allowlist_removed} (including subdomains)")
 
     merged = "\n".join(sorted(all_domains)) + "\n"
 
+    # write output
     try:
         atomic_write(OUTPUT_FILE, merged)
         log(f"[DONE] unique_domains={len(all_domains)} failures={failures_this_run} wrote={OUTPUT_FILE}")
-        return 0 if len(all_domains) else 1
     except Exception as e:
         log(f"[FATAL] Cannot write output: {e}")
         return 3
+
+    # summary (final numbers reflect allowlist + local block)
+    try:
+        total_lines = SOURCES_FILE.read_text(encoding="utf-8").splitlines()
+        sources_active = 0
+        sources_pruned = 0
+
+        for raw in total_lines:
+            s = raw.strip()
+            if not s:
+                continue
+            if s.startswith("# PRUNED "):
+                sources_pruned += 1
+                continue
+            if s.startswith("#"):
+                continue
+            sources_active += 1
+
+        log(
+            "[SUMMARY] "
+            f"sources_active={sources_active} "
+            f"sources_pruned={sources_pruned} "
+            f"sources_total_seen={sources_active + sources_pruned} "
+            f"failures_this_run={failures_this_run} "
+            f"local_block_entries={local_block_entries} "
+            f"local_block_added={local_block_added} "
+            f"allowlist_entries={allowlist_entries} "
+            f"allowlist_removed={allowlist_removed} "
+            f"unique_domains={len(all_domains)}"
+        )
+    except Exception as e:
+        log(f"[WARN] Could not compute summary: {e}")
+
+    return 0 if len(all_domains) else 1
 
 
 if __name__ == "__main__":
