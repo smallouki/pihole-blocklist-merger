@@ -1,0 +1,70 @@
+# Pi-hole Blocklist — Reddit (domains)
+# Generated: 2026-03-18
+# Purpose: Block Reddit web/app access and media/previews served from Reddit-owned domains.
+# Notes:
+# - Pi-hole blocklists are domain-based. This blocks Reddit + Reddit-hosted media/preview endpoints.
+# - It cannot fully prevent "previews" that are re-hosted/cached by the search engine itself.
+# - For broadest coverage, also consider adding the companion regex list below into Pi-hole (Domain management → Regex).
+
+# Core site + app/API
+reddit.com
+www.reddit.com
+old.reddit.com
+new.reddit.com
+np.reddit.com
+m.reddit.com
+amp.reddit.com
+oauth.reddit.com
+api.reddit.com
+gateway.reddit.com
+gql.reddit.com
+accounts.reddit.com
+mods.reddit.com
+mod.reddit.com
+chat.reddit.com
+ssl.reddit.com
+pay.reddit.com
+sendbird.reddit.com
+s.reddit.com
+events.reddit.com
+out.reddit.com
+
+# Shortlinks
+redd.it
+www.redd.it
+
+# Media, images, video, previews
+i.redd.it
+v.redd.it
+preview.redd.it
+external-preview.redd.it
+styles.redditmedia.com
+static.redditmedia.com
+www.redditmedia.com
+redditmedia.com
+
+# Static assets
+redditstatic.com
+www.redditstatic.com
+
+# Common tracking/ads endpoints seen with Reddit properties
+pixel.reddit.com
+ads.reddit.com
+
+# Optional: Reddit corporate/help/status domains (block if you want “anything Reddit-related”)
+redditinc.com
+www.redditinc.com
+reddithelp.com
+www.reddithelp.com
+redditstatus.com
+www.redditstatus.com
+
+# --- Companion Pi-hole REGEX suggestions (copy into Pi-hole regex list) ---
+# ^(^|\.)reddit\.com$
+# ^(^|\.)redd\.it$
+# ^(^|\.)redditmedia\.com$
+# ^(^|\.)redditstatic\.com$
+# ^(^|\.)redd\.it$
+# ^(^|\.)redd\.it$
+# ^(^|\.)redd\.it$
+# (Keep regex minimal; the first 4 lines are the important ones.)

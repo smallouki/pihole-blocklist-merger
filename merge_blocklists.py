@@ -87,6 +87,18 @@ def normalize_url(u: str) -> str:
     return u
 
 
+def is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+def resolve_local_path(raw: str) -> Path:
+    """Resolve a local file path relative to SCRIPT_DIR if not absolute."""
+    p = Path(raw.strip())
+    if not p.is_absolute():
+        p = SCRIPT_DIR / p
+    return p.resolve()
+
+
 def is_ip(token: str) -> bool:
     try:
         ipaddress.ip_address(token)
@@ -245,17 +257,20 @@ def read_sources() -> list[str]:
     if not SOURCES_FILE.exists():
         raise FileNotFoundError(f"Missing sources file: {SOURCES_FILE}")
 
-    urls: list[str] = []
+    sources: list[str] = []
     for raw in SOURCES_FILE.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        urls.append(normalize_url(line))
+        if is_url(line):
+            sources.append(normalize_url(line))
+        else:
+            sources.append(str(resolve_local_path(line)))
 
-    if not urls:
-        raise ValueError(f"No URLs found in {SOURCES_FILE}")
+    if not sources:
+        raise ValueError(f"No sources found in {SOURCES_FILE}")
 
-    return urls
+    return sources
 
 
 def read_allowed() -> Set[str]:
@@ -328,9 +343,11 @@ def main() -> int:
     allowlist_entries = 0
     allowlist_removed = 0
 
-    log(f"[START] Sources={len(urls)} Output={OUTPUT_FILE}")
+    remote_sources = [s for s in urls if is_url(s)]
+    local_sources = [s for s in urls if not is_url(s)]
+    log(f"[START] Sources={len(urls)} (remote={len(remote_sources)} local={len(local_sources)}) Output={OUTPUT_FILE}")
 
-    for url in urls:
+    for url in remote_sources:
         try:
             text = fetch_text(url)
             domains: Set[str] = set()
@@ -351,6 +368,17 @@ def main() -> int:
 
             if cnt >= MAX_CONSECUTIVE_FAILURES:
                 urls_to_prune.add(url)
+
+    for local_path in local_sources:
+        try:
+            text = Path(local_path).read_text(encoding="utf-8")
+            domains = set()
+            for line in text.splitlines():
+                domains |= extract_domains_from_line(line)
+            all_domains |= domains
+            log(f"[LOCAL] {local_path}  domains={len(domains)}")
+        except Exception as e:
+            log(f"[WARN]  Local file could not be read: {local_path}  error={e}")
 
     # prune broken sources after threshold
     if urls_to_prune:
