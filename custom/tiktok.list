@@ -1,0 +1,65 @@
+# Pi-hole Blocklist — TikTok (domains)
+# Generated: 2026-03-18
+# Purpose: Block TikTok web/app access and TikTok-hosted media/CDN endpoints.
+# Notes:
+# - Pi-hole blocklists are domain-based.
+# - This blocks TikTok-owned domains + common TikTok CDNs used for video, images, API.
+# - It cannot fully prevent "previews" that are re-hosted/cached by the search engine itself.
+
+# Core site
+tiktok.com
+www.tiktok.com
+m.tiktok.com
+
+# Core APIs / service subdomains (commonly seen)
+api.tiktok.com
+api16.tiktok.com
+api19.tiktok.com
+api21.tiktok.com
+api22.tiktok.com
+
+# Shortlinks / redirects
+vm.tiktok.com
+vt.tiktok.com
+
+# TikTok CDN / media hosting
+tiktokcdn.com
+www.tiktokcdn.com
+p16.tiktokcdn.com
+p19.tiktokcdn.com
+p21.tiktokcdn.com
+p26.tiktokcdn.com
+p77.tiktokcdn.com
+
+# Video hosting (commonly used)
+tiktokv.com
+www.tiktokv.com
+v16.tiktokv.com
+v19.tiktokv.com
+v21.tiktokv.com
+v22.tiktokv.com
+v26.tiktokv.com
+
+# Legacy / Musical.ly
+musical.ly
+www.musical.ly
+
+# TikTok / ByteDance auxiliary domains often involved in auth/infra
+bytedance.com
+www.bytedance.com
+byteoversea.com
+www.byteoversea.com
+
+# Commonly associated ad/analytics endpoints under TikTok/ByteDance umbrellas (optional, stricter)
+# (Uncomment if you want to be aggressive; may have collateral impact on other ByteDance properties.)
+# tiktokads.com
+# www.tiktokads.com
+# analytics.tiktok.com
+
+# --- Companion Pi-hole REGEX suggestions (copy into Pi-hole regex list) ---
+# ^(^|\.)tiktok\.com$
+# ^(^|\.)tiktokcdn\.com$
+# ^(^|\.)tiktokv\.com$
+# ^(^|\.)musical\.ly$
+# ^(^|\.)vm\.tiktok\.com$
+# ^(^|\.)vt\.tiktok\.com$
