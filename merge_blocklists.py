@@ -342,6 +342,8 @@ def main() -> int:
     local_block_added = 0
     allowlist_entries = 0
     allowlist_removed = 0
+    # (path, domains_added) on success; (path, None) on error
+    local_source_results: list[tuple[str, Optional[int]]] = []
 
     remote_sources = [s for s in urls if is_url(s)]
     local_sources = [s for s in urls if not is_url(s)]
@@ -376,8 +378,10 @@ def main() -> int:
             for line in text.splitlines():
                 domains |= extract_domains_from_line(line)
             all_domains |= domains
+            local_source_results.append((local_path, len(domains)))
             log(f"[LOCAL] {local_path}  domains={len(domains)}")
         except Exception as e:
+            local_source_results.append((local_path, None))
             log(f"[WARN]  Local file could not be read: {local_path}  error={e}")
 
     # prune broken sources after threshold
@@ -451,12 +455,21 @@ def main() -> int:
             f"sources_pruned={sources_pruned} "
             f"sources_total_seen={sources_active + sources_pruned} "
             f"failures_this_run={failures_this_run} "
+            f"local_sources={len(local_source_results)} "
             f"local_block_entries={local_block_entries} "
             f"local_block_added={local_block_added} "
             f"allowlist_entries={allowlist_entries} "
             f"allowlist_removed={allowlist_removed} "
             f"unique_domains={len(all_domains)}"
         )
+
+        if local_source_results:
+            log(f"[LOCAL_SOURCES] count={len(local_source_results)}")
+            for path, domain_count in local_source_results:
+                if domain_count is None:
+                    log(f"[LOCAL_SOURCES]   ERROR  {path}")
+                else:
+                    log(f"[LOCAL_SOURCES]   OK     {path}  domains={domain_count}")
     except Exception as e:
         log(f"[WARN] Could not compute summary: {e}")
 
